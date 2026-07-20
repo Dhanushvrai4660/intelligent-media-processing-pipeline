@@ -196,10 +196,18 @@ reviews this — see Running Instructions below. If anything doesn't come up cle
   low-thousands of images (single indexed field fetch + in-process Hamming distance
   loop). At real scale this needs an LSH/approximate-nearest-neighbour index instead of
   a linear scan.
-- **Local disk storage**, not S3/cloud. Abstracted behind `services/storage.js`
-  specifically so this is a contained swap later, but as shipped it won't survive a
-  container restart without a persistent volume (which the Docker Compose setup does
-  provide via a named volume, but a real deployment would want object storage).
+- **Local disk storage**, not S3/cloud. ~~Abstracted behind `services/storage.js`~~
+  **Update, post-deployment**: this was originally local disk, abstracted behind
+  `services/storage.js` specifically so it could be swapped later. That swap became
+  necessary immediately, not eventually — deploying the API and worker as two separate
+  containers (e.g. two Railway services) revealed they don't share a filesystem, so an
+  image saved by the API was invisible to the worker trying to read it back. Fixed by
+  swapping the storage module to Cloudinary's free tier (durable, globally reachable,
+  zero infra to manage). This is a good example of something that works perfectly in a
+  single `docker compose up` (one shared volume) and silently breaks the moment API and
+  worker become genuinely separate machines — worth calling out as exactly the kind of
+  gap a take-home reviewer running only `docker compose up` locally would never catch,
+  but a real deployment surfaces immediately.
 - **No auth/API keys** on the endpoints — out of scope for a take-home, but would be
   required before this touches real user data.
 
@@ -244,6 +252,8 @@ reviews this — see Running Instructions below. If anything doesn't come up cle
 ### Option A — Docker Compose (recommended, closest to how I'd want this reviewed)
 ```bash
 cp .env.example .env
+# fill in CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET in .env
+# (free account at cloudinary.com -- required, see Trade-offs section on why)
 docker compose up --build
 ```
 This starts MongoDB, Redis, the API (port 3000), and the worker. First run will take a

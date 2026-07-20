@@ -26,7 +26,7 @@ async function processJob(job) {
 
   logger.info(`Processing image ${imageId} (attempt ${image.attempts})`);
 
-  const buffer = readFile(image.storagePath);
+  const buffer = await readFile(image.storagePath);
 
   const { results, issues } = await runAnalysis({
     imageId: image._id,

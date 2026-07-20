@@ -26,7 +26,7 @@ async function uploadImage(req, res) {
       logger.warn(`Could not compute perceptual hash for upload ${imageId}: ${err.message}`);
     }
 
-    const { storedFilename, storagePath } = saveFile(imageId, originalname, buffer);
+    const { storedFilename, storagePath } = await saveFile(imageId, originalname, buffer);
 
     const image = await Image.create({
       _id: imageId,
