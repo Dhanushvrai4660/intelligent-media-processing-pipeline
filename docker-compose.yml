@@ -1,0 +1,64 @@
+version: "3.8"
+
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: node src/server.js
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - MONGO_URI=mongodb://mongo:27017/media_pipeline
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - UPLOAD_DIR=uploads
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: node src/queue/worker.js
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/media_pipeline
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - UPLOAD_DIR=uploads
+      - QUEUE_CONCURRENCY=2
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  uploads_data:

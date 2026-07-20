@@ -1,0 +1,362 @@
+# Intelligent Media Processing Pipeline
+
+A backend system that accepts vehicle image uploads, processes them asynchronously, and
+reports possible issues (blur, low light, duplicates, screenshots, tampering signals,
+invalid number plate format) via a set of self-contained heuristics — no external AI
+APIs, no ML training required.
+
+Stack: **Node.js / Express / MongoDB (Mongoose) / BullMQ + Redis / sharp**.
+
+---
+
+## 1. Architecture
+
+```
+                    ┌──────────────┐
+   POST /api/images │              │  1. save file to disk
+   (multipart image)│  Express API │  2. compute SHA256 + dHash
+   ─────────────────►              │  3. create Mongo doc (status=pending)
+                    │              │  4. enqueue BullMQ job
+                    └──────┬───────┘  5. return {id, status} immediately (202)
+                           │
+                           │ enqueue("analyze", {imageId})
+                           ▼
+                    ┌──────────────┐
+                    │  Redis Queue │
+                    │  (BullMQ)    │
+                    └──────┬───────┘
+                           │ concurrency-limited pull
+                           ▼
+                    ┌──────────────┐
+                    │ Worker process│  status: pending -> processing
+                    │ (separate     │  runs 7 checks in parallel
+                    │  Node process)│  status: processing -> completed | failed
+                    └──────┬───────┘
+                           ▼
+                    ┌──────────────┐
+                    │   MongoDB    │  analysis results + issues[] persisted
+                    └──────┬───────┘
+                           ▲
+                           │ read
+   GET /:id/status  ───────┤
+   GET /:id/results ───────┘
+```
+
+### Service flow
+1. Client `POST`s an image to `/api/images` (multipart, field name `image`).
+2. The API validates MIME type/size, saves the raw bytes to local disk (`storage.js` —
+   deliberately abstracted behind a small module so swapping to S3/GCS later is a
+   one-file change, not a rewrite), computes a SHA256 (exact-duplicate key) and a
+   perceptual dHash (near-duplicate key), writes a Mongo document with
+   `status: "pending"`, enqueues a BullMQ job, and returns `202 Accepted` with the
+   processing ID **before** any analysis has run.
+3. A separate worker process (`npm run worker`) pulls jobs off the queue, flips status
+   to `processing`, reads the file back off disk, and runs all 7 checks. Checks that
+   don't depend on each other run concurrently via `Promise.all`.
+4. Results are written back to the same Mongo document; status flips to `completed`
+   (or `failed` if something fundamental broke, e.g. the file isn't a decodable image).
+5. Clients poll `GET /:id/status` (cheap, just the state machine) or `GET /:id/results`
+   (full analysis, `409` if not completed yet).
+
+### Why a separate worker process (not an in-process job runner)
+Image analysis (especially the OCR check) is CPU-bound and can take seconds. Running it
+in the same process as the HTTP server would block the event loop under load and tank
+API latency for unrelated requests. Splitting API and worker into separate processes
+(even though they share the same codebase and can run on the same machine for this
+take-home) means:
+- The API stays responsive for uploads/status/results regardless of processing backlog.
+- Worker concurrency and process count can be scaled independently of API replicas.
+- A worker crash (see the tesseract.js incident in §3 AI usage) doesn't take the API down.
+
+### Queue strategy
+- **BullMQ over Redis**, chosen over an in-memory queue because in-memory queues lose
+  all pending jobs on a process restart/crash — unacceptable for something as
+  operationally important as "did this upload ever get analyzed." Redis persistence
+  means a restarted worker resumes exactly where it left off.
+- **Per-job retries**: `attempts: 3` with exponential backoff (`2s, 4s, 8s`). Transient
+  failures (disk hiccup, momentary Mongo blip) get retried automatically; only after all
+  attempts are exhausted does the document get marked `status: "failed"` with the last
+  error message recorded. This avoids the failure mode where a document flaps between
+  `processing` and `failed` on every individual attempt, which would make the status API
+  useless to a polling client.
+- **Concurrency** is configurable via `QUEUE_CONCURRENCY` (default 2) — tuned per
+  deployment based on CPU cores available, since OCR and image convolution are both
+  CPU-bound.
+
+### Major design decisions
+| Decision | Reasoning |
+|---|---|
+| ID generated client-visible at upload time (`uuid`), used as both the public ID and Mongo `_id` | Lets the API return an ID synchronously in the 202 response without a second round trip, and the worker/queue only ever need to pass around one ID. |
+| Each analysis check is its own module, orchestrated by `analysis/index.js` | Each heuristic can be unit-tested, tuned, or swapped independently. Adding an 8th check later means adding one file + one line in the orchestrator, not touching the queue/API layer at all. |
+| A single check throwing doesn't fail the whole job | `analysis/index.js` wraps every check in its own try/catch. If OCR fails but blur/brightness/duplicate all succeed, the client still gets 6 useful results instead of a hard failure. The job as a whole only fails on something fundamental (unreadable file, DB write failure). |
+| Thresholds are environment variables, not hardcoded constants | Every heuristic here is a judgment call with no ground truth (see §4 below) — operators should be able to tune sensitivity without a code deploy. |
+| Local OCR (tesseract.js) instead of an external Vision API | You asked for pure heuristics/no external AI APIs — tesseract.js runs fully on-machine (no network call to a third-party service at inference time, only a one-time language-data download), which fits that constraint while still covering the "invalid vehicle number format" requirement from the brief. |
+
+---
+
+## 2. The 7 analysis checks
+
+| Check | Method | Confidence signal |
+|---|---|---|
+| **Blur** | Laplacian variance (classic `cv2.Laplacian().var()` heuristic, reimplemented with sharp's `.convolve()` since native OpenCV bindings are a heavier local install) | `laplacianVariance` vs tunable threshold |
+| **Brightness** | Mean grayscale luminance (`sharp().stats()`) | flags both under- and over-exposed |
+| **Duplicate** | Two-tier: SHA256 exact match, then dHash + Hamming distance for near-duplicates (recompressed/re-saved copies that don't share bytes) | Hamming distance |
+| **Dimensions** | Minimum resolution + aspect-ratio sanity | binary + reasons list |
+| **Screenshot / photo-of-photo** | Weak-signal combination: missing camera EXIF (Make/Model) + resolution matching a known device screen size | weighted confidence score, not a single hard rule |
+| **Tampering** | EXIF `Software` tag matched against known editor signatures, plus ModifyDate-before-DateTimeOriginal timeline inconsistency | explicitly labeled low/medium confidence — see limitations |
+| **Number plate** | Local OCR (tesseract.js) over the full frame, regex-matched against the Indian plate format (`[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}`) | OCR engine confidence score |
+
+None of these claim ground-truth accuracy — see the brief's own framing: *"The goal is
+NOT perfect ML accuracy... structure uncertainty."* Every check returns its raw signal
+(variance, luminance, Hamming distance, confidence score) alongside the boolean flag, so
+a human reviewer downstream can see *why* something was flagged, not just a pass/fail.
+
+---
+
+## 3. AI Usage Disclosure
+
+I (the assignment-taker) used Claude (Anthropic) throughout this build. Concretely:
+
+**Where AI helped:**
+- Scaffolding the overall project structure (folder layout, separation of API/worker/
+  analysis modules) and generating the bulk of the boilerplate (Express routes, Mongoose
+  schema, BullMQ producer/worker wiring, Docker Compose).
+- Implementing the Laplacian-variance blur heuristic and the dHash perceptual-hashing
+  algorithm from the well-known formulas, adapted to sharp's API (no native OpenCV
+  bindings).
+- Drafting the Jest test suite and README structure.
+
+**Where AI output was wrong, and how it was caught (not just claimed — actually run):**
+1. **Multer version.** The first generated `package.json` pinned `multer@1.4.5-lts.1`.
+   Running `npm install` surfaced an npm deprecation warning flagging known CVEs in the
+   1.x line. Fixed by bumping to `multer@^2.0.0` and re-verifying the install.
+2. **tesseract.js crashing outside its promise chain.** The number-plate OCR check was
+   wrapped in a standard `try/catch`, which looks correct and would catch a normal
+   rejected promise. Actually running it against a blocked-network environment revealed
+   that a language-data download failure surfaces as an **uncaught exception on a
+   worker-thread message port**, which bypasses the try/catch entirely and would crash
+   the whole Node process. This is a real, reproducible gap — the fix (process-level
+   `uncaughtException`/`unhandledRejection` handlers in `queue/worker.js`, plus a
+   `Promise.race` timeout wrapper around the OCR call) was added *after* observing the
+   crash, not written speculatively.
+3. **A flaky test.** An early version of the "near-duplicate hash" test used random
+   noise for both the "original" and "recompressed" image. It failed intermittently
+   because pure noise has no stable gradient structure for a dHash to lock onto —
+   recompressing it legitimately produces an unrelated hash. Root-caused and rewritten
+   to use a structured gradient image, which is what the check is actually meant to
+   detect (a real photo re-saved at a different quality).
+4. **Multer error handling.** The first cut passed a 4-arg Express error-handler function
+   directly after `upload.single()` in the router chain — a common but subtly wrong
+   pattern, since multer surfaces file-size/type errors via a callback argument, not a
+   thrown exception, so Express's error-middleware chain never gets invoked that way. Caught
+   by tracing through Express's middleware semantics rather than by execution (no live
+   HTTP server in the verification environment); fixed by wrapping `upload.single()` in
+   an explicit callback.
+
+**How everything was validated (not just asserted):**
+- Every source file was run through `node --check` for syntax validity.
+- `npm install` was actually executed against the real `package.json` (not assumed to
+  work) — this is what surfaced the multer CVE warning.
+- The pure-function checks (blur, brightness, dimensions, screenshot, tampering, SHA256,
+  dHash) were run against real `sharp`-generated test images and manually sanity-checked
+  (e.g. a flat gray image correctly reports `isBlurry: true` because it has zero edge
+  content; a near-black image correctly reports `isLowLight: true`).
+- The OCR check was actually invoked, which is what surfaced the uncaught-exception bug
+  above — a purely code-review pass over AI-generated code would not have caught it.
+- 12 Jest unit tests were written and run to green, including a genuine bug fix along
+  the way (see point 3).
+- The full end-to-end flow (real HTTP requests hitting a running server backed by real
+  MongoDB/Redis) was **not** executed in the environment this was built in, since that
+  environment has no MongoDB/Redis available and restricted network egress. This is
+  disclosed rather than glossed over — see "Not yet verified end-to-end" below.
+
+**Not yet verified end-to-end:** the full request lifecycle (upload → queue → worker →
+DB write → status/results poll) against real MongoDB + Redis instances. The Docker
+Compose setup is provided specifically so this can be verified in <5 minutes by whoever
+reviews this — see Running Instructions below. If anything doesn't come up cleanly on
+`docker compose up`, that's a real finding, not a hidden one.
+
+---
+
+## 4. Trade-offs
+
+**Intentionally simplified / scoped out:**
+- **No plate localization model.** OCR runs on the full frame rather than first cropping
+  to a detected plate region. Simpler to ship, but accuracy on cluttered images (plate
+  is a small fraction of the frame) will be materially lower than a two-stage
+  detect-then-OCR pipeline.
+- **No pixel-level tamper detection (ELA / noise-residue analysis).** The tampering
+  check is EXIF-metadata-only. A careful forgery that strips or rewrites EXIF will not
+  be caught — this is stated explicitly in the check's own output (`note` field), not
+  hidden behind a confident-looking boolean.
+- **Screenshot detection is a weak-signal heuristic**, not a trained classifier. It will
+  under-detect on Android devices that preserve some EXIF, and could false-positive on a
+  vehicle photo taken with a camera app that strips EXIF for privacy.
+- **Near-duplicate scan is O(n) over all stored perceptual hashes.** Fine at hundreds/
+  low-thousands of images (single indexed field fetch + in-process Hamming distance
+  loop). At real scale this needs an LSH/approximate-nearest-neighbour index instead of
+  a linear scan.
+- **Local disk storage**, not S3/cloud. Abstracted behind `services/storage.js`
+  specifically so this is a contained swap later, but as shipped it won't survive a
+  container restart without a persistent volume (which the Docker Compose setup does
+  provide via a named volume, but a real deployment would want object storage).
+- **No auth/API keys** on the endpoints — out of scope for a take-home, but would be
+  required before this touches real user data.
+
+**What I'd improve with more time:**
+- Plate-region localization before OCR (even a simple contour/edge-based crop heuristic
+  would likely beat full-frame OCR meaningfully).
+- A lightweight admin/reviewer dashboard (the `issues[]` array on each document is
+  already shaped for this — it's a rendering task, not a data-model change).
+- Structured confidence calibration across checks (right now each check invents its own
+  0–1 confidence scale somewhat ad hoc; a shared calibration approach would make
+  aggregate "overall risk score" more meaningful).
+- Idempotency key on upload (currently two rapid uploads of the same file both get
+  accepted and queued; exact-duplicate detection catches it *after* processing, not
+  before).
+
+**Scalability concerns:**
+- Worker concurrency and count scale horizontally (stateless, pulls from shared Redis
+  queue) — this is the easy part.
+- MongoDB writes are single-document upserts keyed by `_id`, no contention issues at
+  reasonable scale.
+- The near-duplicate O(n) scan (noted above) is the first thing that would need
+  re-architecting under real load.
+- OCR (tesseract.js) is the heaviest single check, CPU-bound and the main driver of
+  per-job latency — a candidate for its own dedicated worker pool/queue if the other
+  checks need to stay fast.
+
+**Failure handling concerns:**
+- BullMQ retries (3 attempts, exponential backoff) cover transient failures.
+- A single check failing does not fail the job (see architecture section) — but this
+  means a `completed` job can have a `null`/`error` sub-object for one check. Clients
+  reading `analysis.numberPlate` etc. should handle that shape, which is documented in
+  the sample response below.
+- The uncaught-exception safety net in the worker (§3) prevents one bad OCR run from
+  taking down every in-flight job on that worker process — but a worker that keeps
+  hitting the same uncaught exception repeatedly would benefit from a circuit
+  breaker/health check that isn't implemented here.
+
+---
+
+## 5. Running Instructions
+
+### Option A — Docker Compose (recommended, closest to how I'd want this reviewed)
+```bash
+cp .env.example .env
+docker compose up --build
+```
+This starts MongoDB, Redis, the API (port 3000), and the worker. First run will take a
+minute or two while `npm install` runs inside the image build.
+
+### Option B — Local Node, services running separately
+Requires MongoDB and Redis already running locally (e.g. `brew services start mongodb-community redis`, or your own instances).
+
+```bash
+cp .env.example .env      # adjust MONGO_URI / REDIS_HOST if not on localhost defaults
+npm install
+npm run dev                # terminal 1: API server on :3000
+npm run worker:dev         # terminal 2: worker process
+```
+
+### Seeding sample data
+With the API running:
+```bash
+npm run seed
+```
+Generates and uploads 5 synthetic images exercising different checks (normal, blurry,
+low-light, screenshot-resolution, too-small), so you have something to poll immediately
+without needing real photos.
+
+### Running tests
+```bash
+npm test
+```
+Runs the Jest suite (12 tests) covering the pure analysis functions — no DB/Redis
+required for these, they run against synthetically generated `sharp` images.
+
+**Note on the number-plate check:** tesseract.js downloads its English language model
+(`eng.traineddata`, ~10-15MB) from a CDN on first use and caches it locally. This means
+the *first* OCR run on a fresh machine needs outbound internet access; subsequent runs
+use the cached model. If your environment has restricted egress, this check will fail
+gracefully (returns `isValidFormat: false` with an `error` field) without affecting the
+other 6 checks or crashing the worker — this exact failure mode is what surfaced the
+uncaught-exception bug described in §3.
+
+---
+
+## 6. Sample API requests/responses
+
+**Upload**
+```bash
+curl -X POST http://localhost:3000/api/images \
+  -F "image=@./sample-vehicle.jpg"
+```
+```json
+{
+  "id": "a1b2c3d4-...",
+  "status": "pending",
+  "uploadedAt": "2026-07-20T10:00:00.000Z",
+  "message": "Image accepted for processing"
+}
+```
+
+**Status**
+```bash
+curl http://localhost:3000/api/images/a1b2c3d4-.../status
+```
+```json
+{
+  "id": "a1b2c3d4-...",
+  "status": "completed",
+  "uploadedAt": "2026-07-20T10:00:00.000Z",
+  "processingStartedAt": "2026-07-20T10:00:01.200Z",
+  "processedAt": "2026-07-20T10:00:03.900Z",
+  "attempts": 1,
+  "failureReason": null
+}
+```
+
+**Results**
+```bash
+curl http://localhost:3000/api/images/a1b2c3d4-.../results
+```
+```json
+{
+  "id": "a1b2c3d4-...",
+  "originalFilename": "sample-vehicle.jpg",
+  "status": "completed",
+  "issues": [
+    { "check": "brightness", "severity": "warning", "message": "Image is too dark (low light)" }
+  ],
+  "analysis": {
+    "blur": { "laplacianVariance": 342.11, "threshold": 100, "isBlurry": false, "confidence": 0.75 },
+    "brightness": { "meanLuminance": 41.2, "level": "low_light", "isLowLight": true, "isOverexposed": false },
+    "duplicate": { "isDuplicate": false, "matchType": null },
+    "dimensions": { "width": 1600, "height": 1200, "isValid": true, "reasons": [] },
+    "screenshot": { "isLikelyScreenshot": false, "confidence": 0.0, "reasons": [] },
+    "tampering": { "isSuspicious": false, "confidence": 0.2, "reasons": [] },
+    "numberPlate": { "detectedText": "KA05MN1234", "isValidFormat": true, "ocrConfidence": 87.3 }
+  }
+}
+```
+
+**List (paginated)**
+```bash
+curl "http://localhost:3000/api/images?page=1&limit=20&status=completed"
+```
+
+---
+
+## 7. Assumptions made
+- "Vehicle images from the field" means real-world, possibly imperfect photos (as
+  opposed to studio-quality captures), which is why thresholds are tuned conservatively
+  and everything is environment-configurable.
+- The number plate format target is **Indian** registration plates specifically (per the
+  brief's context and example), not a generic international format.
+- Single-node MongoDB/Redis is sufficient for this take-home; replica sets / Redis
+  clustering are out of scope but the code doesn't do anything that would block adding
+  them later (no unsupported transactions, standard BullMQ connection options).
+- "Async processing" means the upload API must return before analysis completes — it
+  does not mandate a specific SLA on how fast the worker picks up the job, which is
+  governed by `QUEUE_CONCURRENCY` and Redis availability.
