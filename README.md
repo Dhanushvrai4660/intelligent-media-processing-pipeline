@@ -137,7 +137,7 @@ were built out:
 | **Dimensions** | Minimum resolution + aspect-ratio sanity | binary + reasons list |
 | **Screenshot / photo-of-photo** | Weak-signal combination: missing camera EXIF (Make/Model) + resolution matching a known device screen size | weighted confidence score, not a single hard rule |
 | **Tampering** | EXIF `Software` tag matched against known editor signatures, plus ModifyDate-before-DateTimeOriginal timeline inconsistency | explicitly labeled low/medium confidence — see limitations |
-| **Number plate** | Local OCR (tesseract.js) over the full frame, regex-matched against the Indian plate format (`[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}`) | OCR engine confidence score |
+| **Number plate** | Two local OCR passes (tesseract.js): full frame, plus a cropped + upscaled bottom band targeting where plates sit on rear-vehicle photos, regex-matched against the Indian plate format (`[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}`) | OCR engine confidence score, plus which pass matched |
 
 None of these claim ground-truth accuracy — see the brief's own framing: *"The goal is
 NOT perfect ML accuracy... structure uncertainty."* Every check returns its raw signal
@@ -312,8 +312,19 @@ from a reviewer's specific network.
   required before this touches real user data.
 
 **What I'd improve with more time:**
-- Plate-region localization before OCR (even a simple contour/edge-based crop heuristic
-  would likely beat full-frame OCR meaningfully).
+- ~~Plate-region localization before OCR~~ — implemented after a real failure case
+  surfaced it: testing against actual sample images (ad-wrapped auto-rickshaws, a
+  genuinely hard case) showed full-frame OCR producing pure noise on a photo where the
+  plate was clearly legible to the eye — the large, high-contrast ad banner text was
+  visually dominating the frame. Fixed by adding a second OCR pass over a cropped and
+  upscaled bottom band (see §2 table), run in parallel with the full-frame pass via
+  `Promise.allSettled` so neither can block the other. The crop fraction (0.42 of image
+  height) wasn't guessed — it was tuned by generating comparison crops at 0.35/0.42/0.50
+  against the real sample images and visually checking which one reliably captured the
+  plate with margin (0.35 cropped it right at the boundary in more than one sample).
+  This does NOT guarantee correct detection on every image — it's still a heuristic
+  reacting to one observed failure mode, not a trained plate detector — but it's a
+  concrete, evidenced improvement over the original full-frame-only approach.
 - Structured confidence calibration across checks (right now each check invents its own
   0–1 confidence scale somewhat ad hoc; a shared calibration approach would make
   aggregate "overall risk score" more meaningful).
@@ -343,13 +354,15 @@ Measured against the live deployment (Railway, shared/free-tier compute), a real
 |---|---|
 | Upload → `202 Accepted` response | ~300-500ms (Cloudinary upload + SHA256/dHash compute, before any analysis runs) |
 | Queued → worker picks up job | typically <1s (BullMQ + Redis, no polling delay) |
-| Full analysis (all 7 checks, run concurrently via `Promise.all`) | ~2.5-3.5s end-to-end |
+| Full analysis (all 7 checks, run concurrently via `Promise.all`) | ~2.5-3.5s measured pre-two-pass-OCR (§4); expect ~3.5-5.5s now that number-plate runs two OCR passes, since OCR was already the tail latency the other 6 checks complete well within |
 
 Breaking down the ~3s analysis window by check (approximate, based on repeated local
 runs against similarly-sized images — not isolated with a profiler, so treat as
 directional rather than precise):
-- **OCR (tesseract.js)** dominates: ~1.5-2.5s alone, since it runs full-frame text
-  recognition rather than on a pre-cropped region (see Trade-offs above).
+- **OCR (tesseract.js)** dominates: originally ~1.5-2.5s for a single full-frame pass;
+  now runs two passes (full frame + cropped bottom band, see §4 trade-offs for why),
+  issued concurrently but largely serializing on this deployment's single shared vCPU
+  free tier — expect roughly double, so ~3-5s for this check alone on a typical image.
 - **Blur detection** (grayscale convert + 3×3 convolution + variance over every pixel):
   tens of milliseconds, scales with pixel count.
 - **Brightness, dimensions, screenshot, tampering**: each in the low tens of
