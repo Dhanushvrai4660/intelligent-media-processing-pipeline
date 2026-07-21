@@ -1,7 +1,9 @@
 # Intelligent Media Processing Pipeline
 
-**Live deployment:** https://intelligent-media-processing-pipeline-production.up.railway.app
-**Health check:** https://intelligent-media-processing-pipeline-production.up.railway.app/health
+**Live deployment:** https://media-pipeline-backup.onrender.com
+**Health check:** https://media-pipeline-backup.onrender.com/health
+**Backup deployment:** https://intelligent-media-processing-pipeline-production.up.railway.app
+(both share the same MongoDB/Redis/Cloudinary backend — see note below)
 **Repository:** https://github.com/Dhanushvrai4660/intelligent-media-processing-pipeline
 
 A backend system that accepts vehicle image uploads, processes them asynchronously, and
@@ -252,6 +254,27 @@ a shared `.env` by default — a real multi-host deployment doesn't:
 All three were caught by actually deploying and hitting the live endpoints, not by
 re-reading the code more carefully — which is the core argument for why the "not yet
 verified end-to-end" gap noted above mattered enough to close before submission.
+
+**Update — a fourth finding, this time about the hosting platform itself, not the code:**
+Testing the live Railway URL from multiple devices (own phone, a friend's phone, both
+on Jio — India's largest mobile carrier) turned up `DNS_PROBE_FINISHED_NXDOMAIN`
+consistently, while independent checks (`nslookup <domain> 8.8.8.8`, dnschecker.org,
+downforeveryoneorjustme.com) all confirmed the domain was live and correctly
+propagated globally. A search of Railway's own community support forum surfaced
+multiple, recurring reports (spanning months, including recent ones) of Jio
+specifically failing to resolve `*.up.railway.app` domains for a meaningful number of
+users — this is a known platform-level issue, not something wrong with this
+deployment. Given the submission's audience is a college placement team in India,
+where Jio has very large market share, this was treated as a real risk rather than
+dismissed. Mitigation: a second deployment on Render (`onrender.com`, different
+infrastructure, not affected by the same block) was stood up as the primary link, kept
+warm via a free external cron ping (Render's free tier sleeps after 15 minutes of
+inactivity otherwise), sharing the same MongoDB/Redis/Cloudinary backend as the
+Railway deployment — so the Render deployment doesn't need its own worker process;
+Railway's worker keeps handling every job regardless of which URL received the
+upload. Railway's URL is kept as a documented backup, and the repository's Docker
+Compose setup remains the ultimate fallback if both hosted links are ever unreachable
+from a reviewer's specific network.
 
 ---
 
