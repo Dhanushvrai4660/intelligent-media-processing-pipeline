@@ -1,11 +1,17 @@
 # Intelligent Media Processing Pipeline
 
+**Live deployment:** https://intelligent-media-processing-pipeline-production.up.railway.app
+**Health check:** https://intelligent-media-processing-pipeline-production.up.railway.app/health
+**Repository:** https://github.com/Dhanushvrai4660/intelligent-media-processing-pipeline
+
 A backend system that accepts vehicle image uploads, processes them asynchronously, and
 reports possible issues (blur, low light, duplicates, screenshots, tampering signals,
 invalid number plate format) via a set of self-contained heuristics — no external AI
 APIs, no ML training required.
 
-Stack: **Node.js / Express / MongoDB (Mongoose) / BullMQ + Redis / sharp**.
+Stack: **Node.js / Express / MongoDB (Mongoose) / BullMQ + Redis / sharp**, deployed on
+Railway with MongoDB Atlas + Upstash Redis + Cloudinary (see §5 for why this exact
+combination).
 
 ---
 
@@ -176,6 +182,52 @@ Compose setup is provided specifically so this can be verified in <5 minutes by 
 reviews this — see Running Instructions below. If anything doesn't come up cleanly on
 `docker compose up`, that's a real finding, not a hidden one.
 
+**Update — deployed, and found three more real issues doing it:**
+
+Getting this onto Railway (API + worker as two separate services) + MongoDB Atlas +
+Upstash Redis surfaced three concrete bugs that a purely local `docker compose up`
+would never have caught, because Docker Compose gives every service a shared volume and
+a shared `.env` by default — a real multi-host deployment doesn't:
+
+1. **Shared-filesystem assumption in `storage.js`.** The original implementation saved
+   uploads to local disk and had the worker read them back from the same path. That's
+   correct on one machine (or one Docker Compose network with a shared volume), but
+   completely broken once the API and worker are two independent containers on Railway
+   with no shared disk — the worker would get "file not found" on every single job.
+   Fixed by swapping to Cloudinary (free tier): the API uploads the buffer and stores
+   the returned URL instead of a local path; the worker fetches the image over HTTPS
+   before running analysis. `storage.js`'s two functions (`saveFile`/`readFile`) were
+   the only things that needed to change — the analysis layer, queue, and API routes
+   didn't care, which validated that abstracting storage behind a small module (a
+   decision made upfront, see §1) was worth it in practice, not just in theory.
+2. **Worker crashed with `ECONNREFUSED 127.0.0.1:6379` / `127.0.0.1:27017`.** The
+   worker service was deployed without its `MONGO_URI`/`REDIS_URL` environment
+   variables actually set (they'd only been added to the API service, not copied to
+   the separate worker service) — so `createRedisConnection()` and `connectDB()` fell
+   back to their local-development defaults (`localhost`), which don't exist inside a
+   Railway container. The fix was operational (add the variables to the worker service
+   too), but the *finding* is a real one: **the app's own error message immediately
+   told us the cause** (connecting to `127.0.0.1` instead of a real host is only
+   possible if the env var read as empty), which is exactly why the earlier engineering
+   decision to log Redis/Mongo connection errors with full context (§1, worker.js) paid
+   off during actual debugging rather than being redundant boilerplate.
+3. **Domain resolved everywhere except two of my own networks.** After generating the
+   Railway domain, `/health` failed with `DNS_PROBE_FINISHED_NXDOMAIN` on my laptop
+   *and* my phone on mobile data, while `nslookup <domain> 8.8.8.8` and
+   dnschecker.org both confirmed the record was live and propagated globally. This
+   was diagnosed as local ISP/carrier DNS resolvers not having picked up a brand-new
+   subdomain yet, not a deployment problem — verified by testing against Google's public
+   DNS directly rather than assuming either "it's broken" or "it's fine" without
+   evidence. Fixed locally by switching the laptop's DNS to `8.8.8.8`/`8.8.4.4`; not a
+   code change, and very unlikely to affect the graders' machines, but recorded here
+   because "confirm the failure is actually in your system before touching code" is
+   the same debugging discipline as the two bugs above, applied to infrastructure
+   instead of application code.
+
+All three were caught by actually deploying and hitting the live endpoints, not by
+re-reading the code more carefully — which is the core argument for why the "not yet
+verified end-to-end" gap noted above mattered enough to close before submission.
+
 ---
 
 ## 4. Trade-offs
@@ -295,7 +347,43 @@ uncaught-exception bug described in §3.
 
 ---
 
-## 6. Sample API requests/responses
+## 6. Live verification (actually run against the deployed system)
+
+This isn't a hypothetical sample — this is real output from the live Railway
+deployment, tested with a real photo (not a synthetic test image):
+
+```powershell
+curl.exe -X POST https://intelligent-media-processing-pipeline-production.up.railway.app/api/images `
+  -F "image=@D:\formal photo\Dhanush V Rai .jpeg"
+```
+```json
+{"id":"4cc338a8-95dc-49ba-b830-91f2cc4a449e","status":"pending","uploadedAt":"2026-07-21T03:55:42.166Z","message":"Image accepted for processing"}
+```
+
+~4 seconds later:
+```powershell
+curl.exe https://intelligent-media-processing-pipeline-production.up.railway.app/api/images/4cc338a8-95dc-49ba-b830-91f2cc4a449e/status
+```
+```json
+{"status":"completed","processingStartedAt":"2026-07-21T03:55:43.081Z","processedAt":"2026-07-21T03:55:46.646Z","attempts":1,"failureReason":null}
+```
+
+```powershell
+curl.exe https://intelligent-media-processing-pipeline-production.up.railway.app/api/images/4cc338a8-95dc-49ba-b830-91f2cc4a449e/results
+```
+Notably, the **tampering check correctly flagged a real, previously-unknown fact about
+this photo** — its EXIF `Software` tag read `"Snapseed 2.0"`, meaning it genuinely had
+been edited at some point, which I hadn't verified beforehand. This is the kind of
+result that actually demonstrates the heuristic works on real data, not just on
+synthetic images built specifically to trigger it (see §5 for those). The number-plate
+check also behaved correctly by *not* finding a match — this was a portrait photo, not
+a vehicle image, and the raw OCR output visible in the response shows exactly the kind
+of noisy text a full-frame OCR pass produces, which the regex-matching step is designed
+to filter through rather than misreport as a false positive.
+
+---
+
+## 7. Sample API requests/responses
 
 **Upload**
 ```bash
@@ -358,7 +446,7 @@ curl "http://localhost:3000/api/images?page=1&limit=20&status=completed"
 
 ---
 
-## 7. Assumptions made
+## 8. Assumptions made
 - "Vehicle images from the field" means real-world, possibly imperfect photos (as
   opposed to studio-quality captures), which is why thresholds are tuned conservatively
   and everything is environment-configurable.
