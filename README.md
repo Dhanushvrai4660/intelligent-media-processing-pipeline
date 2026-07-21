@@ -97,6 +97,31 @@ take-home) means:
 | A single check throwing doesn't fail the whole job | `analysis/index.js` wraps every check in its own try/catch. If OCR fails but blur/brightness/duplicate all succeed, the client still gets 6 useful results instead of a hard failure. The job as a whole only fails on something fundamental (unreadable file, DB write failure). |
 | Thresholds are environment variables, not hardcoded constants | Every heuristic here is a judgment call with no ground truth (see §4 below) — operators should be able to tune sensitivity without a code deploy. |
 | Local OCR (tesseract.js) instead of an external Vision API | You asked for pure heuristics/no external AI APIs — tesseract.js runs fully on-machine (no network call to a third-party service at inference time, only a one-time language-data download), which fits that constraint while still covering the "invalid vehicle number format" requirement from the brief. |
+| Dashboard is static HTML/CSS/JS served by the same Express app, not a separate SPA/build step | The brief lists dashboard/UI as bonus, not core — a build pipeline (React/Vite/etc.) would add real complexity (bundling, a second deploy target, CORS configuration) for a UI whose whole job is to call an API that already exists and returns clean JSON. Serving `public/` as static assets from the existing Express app means one deployed service, one URL, and the dashboard automatically stays in sync with whatever's actually running — no build step to forget, no separate hosting to configure. |
+| Analytics aggregation logic lives in a pure function (`services/analytics.js`), separate from the Mongo query that feeds it | Same reasoning as the analysis checks: the aggregation math (issue frequency, duplicate rate, processing-time percentiles) is unit-testable with hand-built fixtures, with no live database required — see §6 tests. |
+
+---
+
+## 1a. Dashboard & Analytics (bonus scope)
+
+Beyond the required Upload/Status/Results APIs, two bonus items from the brief's list
+were built out:
+
+- **`GET /api/analytics`** — aggregate stats across all processed images: status
+  breakdown, issue frequency by check type, duplicate rate, and processing-time
+  percentiles (avg/p95/min/max). Status counts come from a cheap Mongo `$group`
+  aggregation; per-check stats are computed in the app layer over completed documents
+  (a real scale limit at high volume, see §4 Trade-offs, but fine at the size this
+  system is meant to run at).
+- **A dashboard at `/`** — upload an image via drag-and-drop, watch it move through
+  pending → processing → completed in near-real-time (4s poll interval), browse recent
+  uploads with status/issue-severity tags styled after physical QC inspection tags
+  (a deliberate nod to the "field inspection" subject matter rather than generic colored
+  badges), and click into any image for its full per-check breakdown. No build step, no
+  framework — plain HTML/CSS/JS served as static assets by the same Express app that
+  serves the API, so it's live at the same URL with zero extra deployment configuration.
+
+
 
 ---
 
@@ -266,14 +291,14 @@ verified end-to-end" gap noted above mattered enough to close before submission.
 **What I'd improve with more time:**
 - Plate-region localization before OCR (even a simple contour/edge-based crop heuristic
   would likely beat full-frame OCR meaningfully).
-- A lightweight admin/reviewer dashboard (the `issues[]` array on each document is
-  already shaped for this — it's a rendering task, not a data-model change).
 - Structured confidence calibration across checks (right now each check invents its own
   0–1 confidence scale somewhat ad hoc; a shared calibration approach would make
   aggregate "overall risk score" more meaningful).
 - Idempotency key on upload (currently two rapid uploads of the same file both get
   accepted and queued; exact-duplicate detection catches it *after* processing, not
   before).
+- ~~A lightweight admin/reviewer dashboard~~ — built (§1a): a static dashboard at `/`
+  covering upload, live status tracking, and per-check result browsing.
 
 **Scalability concerns:**
 - Worker concurrency and count scale horizontally (stateless, pulls from shared Redis
@@ -285,6 +310,64 @@ verified end-to-end" gap noted above mattered enough to close before submission.
 - OCR (tesseract.js) is the heaviest single check, CPU-bound and the main driver of
   per-job latency — a candidate for its own dedicated worker pool/queue if the other
   checks need to stay fast.
+
+**Benchmark / performance analysis:**
+
+Measured against the live deployment (Railway, shared/free-tier compute), a real
+1382×1600 JPEG photo:
+
+| Stage | Duration |
+|---|---|
+| Upload → `202 Accepted` response | ~300-500ms (Cloudinary upload + SHA256/dHash compute, before any analysis runs) |
+| Queued → worker picks up job | typically <1s (BullMQ + Redis, no polling delay) |
+| Full analysis (all 7 checks, run concurrently via `Promise.all`) | ~2.5-3.5s end-to-end |
+
+Breaking down the ~3s analysis window by check (approximate, based on repeated local
+runs against similarly-sized images — not isolated with a profiler, so treat as
+directional rather than precise):
+- **OCR (tesseract.js)** dominates: ~1.5-2.5s alone, since it runs full-frame text
+  recognition rather than on a pre-cropped region (see Trade-offs above).
+- **Blur detection** (grayscale convert + 3×3 convolution + variance over every pixel):
+  tens of milliseconds, scales with pixel count.
+- **Brightness, dimensions, screenshot, tampering**: each in the low tens of
+  milliseconds — these read `sharp` metadata/stats or parse a small EXIF block, no
+  per-pixel work beyond what `sharp` does internally in native code.
+- **Duplicate detection**: dominated by the near-duplicate scan's cost, which is O(n) in
+  the number of previously-uploaded images (see Trade-offs) — negligible at the dataset
+  size used for this test, but the one check whose cost profile changes with scale
+  rather than image size.
+
+Practical implication: OCR is the only check worth optimizing first if throughput
+becomes a concern — running it in its own worker pool (so a burst of OCR-heavy jobs
+doesn't starve the other, much cheaper checks) would be the highest-leverage change,
+ahead of anything else in this list.
+
+**Cost optimization thinking:**
+
+Every external dependency in this system runs on a free tier by design, which was a
+deliberate choice for a take-home rather than an accident of "whatever was easiest":
+- **MongoDB Atlas M0** (free forever, 512MB) — plenty for the data volumes a take-home
+  or early-stage version of this system would see; the schema has no unusual storage
+  pressure (no embedded blobs, images live in Cloudinary not Mongo).
+- **Upstash Redis** (free tier, pay-per-request beyond it) — a good fit specifically
+  *because* BullMQ's traffic pattern here is bursty (a job enqueued per upload, then
+  idle) rather than constant, which is exactly what a serverless/pay-per-request Redis
+  is priced for, versus a fixed-cost always-on Redis instance sized for peak load.
+- **Cloudinary free tier** (25GB storage/bandwidth credits) — read/write pattern is
+  write-once (upload), read-a-few-times (worker fetch + any dashboard reads), which
+  fits a free-tier CDN-backed store well; would become the first cost line to watch at
+  real scale, alongside the OCR compute cost below.
+- **Railway** (free trial credit, then usage-based) — the concurrency/replica knobs
+  (`QUEUE_CONCURRENCY`) are exposed as env vars specifically so cost/throughput can be
+  tuned without a redeploy — running 1 replica at low concurrency costs less and is
+  the right default until there's evidence of a real backlog.
+
+If this needed to run at meaningfully higher volume, the OCR check (§ Benchmark above)
+is also the first cost lever: it's the most CPU-time-expensive check by a wide margin,
+so batching multiple images per OCR worker invocation, or moving just that one check to
+cheaper spot/preemptible compute (since a failed OCR job just retries via BullMQ rather
+than needing guaranteed uptime), would cut compute cost disproportionately compared to
+optimizing any of the other six checks.
 
 **Failure handling concerns:**
 - BullMQ retries (3 attempts, exponential backoff) cover transient failures.
@@ -443,6 +526,26 @@ curl http://localhost:3000/api/images/a1b2c3d4-.../results
 ```bash
 curl "http://localhost:3000/api/images?page=1&limit=20&status=completed"
 ```
+
+**Analytics (bonus)**
+```bash
+curl http://localhost:3000/api/analytics
+```
+```json
+{
+  "totalImages": 42,
+  "byStatus": { "pending": 1, "processing": 0, "completed": 39, "failed": 2 },
+  "totalCompleted": 39,
+  "issueFrequency": { "brightness": 11, "tampering": 6, "numberPlate": 22, "blur": 4 },
+  "duplicateRate": 0.077,
+  "perCheckErrorCount": 0,
+  "processingTime": { "avgMs": 2840, "p95Ms": 4120, "minMs": 1980, "maxMs": 4310, "sampleSize": 39 },
+  "generatedAt": "2026-07-21T09:20:00.000Z"
+}
+```
+
+**Dashboard (bonus)** — open `http://localhost:3000/` (or the live deployment root
+URL) in a browser for the upload/status/results UI described in §1a.
 
 ---
 

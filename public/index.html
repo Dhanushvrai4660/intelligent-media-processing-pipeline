@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Media Processing Pipeline — Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◆</span>
+        <div>
+          <h1>Intelligent Media Processing Pipeline</h1>
+          <p class="subtitle">Async vehicle image analysis — upload, track, review</p>
+        </div>
+      </div>
+      <div class="live-indicator" id="liveIndicator">
+        <span class="dot"></span> Live
+      </div>
+    </header>
+
+    <section class="stats-row" id="statsRow">
+      <!-- populated by app.js -->
+    </section>
+
+    <main class="main-grid">
+      <section class="panel upload-panel">
+        <h2>Upload an image</h2>
+        <div id="dropZone" class="drop-zone">
+          <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden />
+          <div class="drop-zone-inner">
+            <span class="drop-icon">⬆</span>
+            <p><strong>Click to choose</strong> or drag an image here</p>
+            <p class="hint">JPEG, PNG, or WEBP — max 15MB</p>
+          </div>
+        </div>
+        <div id="uploadStatus" class="upload-status"></div>
+
+        <h2 class="issues-heading">Issue frequency</h2>
+        <div id="issueFrequency" class="issue-frequency">
+          <p class="empty-hint">No completed images yet.</p>
+        </div>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="results-header">
+          <h2>Recent uploads</h2>
+          <div class="filter-row">
+            <select id="statusFilter">
+              <option value="">All statuses</option>
+              <option value="pending">Pending</option>
+              <option value="processing">Processing</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+            </select>
+            <button id="refreshBtn" class="ghost-btn">Refresh</button>
+          </div>
+        </div>
+        <div id="imageList" class="image-list">
+          <p class="empty-hint">No images uploaded yet — upload one to get started.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="detailOverlay" class="detail-overlay hidden">
+    <div class="detail-modal">
+      <button id="closeDetail" class="close-btn">✕</button>
+      <div id="detailContent"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

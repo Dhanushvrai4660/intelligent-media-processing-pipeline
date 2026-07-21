@@ -1,10 +1,12 @@
 const express = require("express");
+const path = require("path");
 const helmet = require("helmet");
 const cors = require("cors");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 
 const imagesRouter = require("./routes/images");
+const analyticsRouter = require("./routes/analytics");
 const logger = require("./utils/logger");
 
 const app = express();
@@ -34,6 +36,13 @@ app.use("/api/images", (req, res, next) => {
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 app.use("/api/images", imagesRouter);
+app.use("/api/analytics", analyticsRouter);
+
+// Dashboard: a static, dependency-free HTML/CSS/JS UI that talks to the JSON API above.
+// Bonus-scope (the brief lists "dashboard/UI" as optional), so kept intentionally simple:
+// no build step, no framework, served directly by the same Express app that serves the
+// API -- one deployed service, one URL, nothing extra to host or configure.
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });

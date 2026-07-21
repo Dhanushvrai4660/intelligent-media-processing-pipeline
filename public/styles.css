@@ -1,0 +1,438 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg: #14171c;
+  --panel: #1c2028;
+  --panel-raised: #22262f;
+  --border: #2a2f3a;
+  --text: #e8eaed;
+  --text-dim: #8b93a1;
+  --text-faint: #5a6170;
+  --accent: #f2a93b;
+  --accent-dim: #7a5a22;
+  --ok: #4cae7d;
+  --ok-bg: rgba(76, 174, 125, 0.12);
+  --warn: #f2a93b;
+  --warn-bg: rgba(242, 169, 59, 0.12);
+  --crit: #e85d5d;
+  --crit-bg: rgba(232, 93, 93, 0.12);
+  --info: #5b8def;
+  --info-bg: rgba(91, 141, 239, 0.12);
+  --radius: 10px;
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  background-image:
+    linear-gradient(180deg, rgba(242, 169, 59, 0.04) 0%, transparent 200px);
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: var(--accent-dim); color: var(--text); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+/* ---------- Topbar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.brand { display: flex; align-items: center; gap: 14px; }
+
+.brand-mark {
+  color: var(--accent);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.brand h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 0 rgba(76, 174, 125, 0.5);
+  animation: pulse 2.4s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot { animation: none; }
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(76, 174, 125, 0.45); }
+  70% { box-shadow: 0 0 0 7px rgba(76, 174, 125, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 174, 125, 0); }
+}
+
+/* ---------- Stats row ---------- */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.stat-card .value {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stat-card .label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-card.accent .value { color: var(--accent); }
+.stat-card.ok .value { color: var(--ok); }
+.stat-card.crit .value { color: var(--crit); }
+
+/* ---------- Main grid ---------- */
+.main-grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .main-grid { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.panel h2 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 14px;
+}
+
+.issues-heading { margin-top: 28px; }
+
+/* ---------- Upload ---------- */
+.drop-zone {
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(242, 169, 59, 0.05);
+}
+
+.drop-icon {
+  display: inline-block;
+  font-size: 20px;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.drop-zone-inner p { margin: 0 0 4px; font-size: 13.5px; }
+.drop-zone-inner .hint { color: var(--text-faint); font-size: 12px; }
+
+.upload-status {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  min-height: 18px;
+}
+
+.upload-status.error { color: var(--crit); }
+.upload-status.ok { color: var(--ok); }
+
+/* ---------- Issue frequency ---------- */
+.issue-frequency { display: flex; flex-direction: column; gap: 8px; }
+
+.issue-bar-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.issue-bar-row .label { color: var(--text-dim); text-transform: capitalize; }
+
+.issue-bar-track {
+  height: 6px;
+  background: var(--panel-raised);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.issue-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.issue-bar-row .count { font-family: var(--font-mono); color: var(--text-faint); text-align: right; }
+
+.empty-hint { color: var(--text-faint); font-size: 13px; margin: 0; }
+
+/* ---------- Results panel ---------- */
+.results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.filter-row { display: flex; gap: 8px; }
+
+select, .ghost-btn {
+  background: var(--panel-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.image-list { display: flex; flex-direction: column; gap: 8px; }
+
+.image-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.image-row:hover { border-color: var(--accent); }
+
+.thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.image-row .filename {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-row .meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+.image-row .issue-count {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* ---------- Inspection tag (signature element) ---------- */
+/* A status pill shaped like a physical QC tag: a small punched hole on the left,
+   reflecting the "field inspection" subject rather than a generic colored badge. */
+.tag {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 16px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.tag::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+.tag.status-pending { background: var(--panel); color: var(--text-dim); border: 1px solid var(--border); }
+.tag.status-processing { background: var(--info-bg); color: var(--info); }
+.tag.status-completed { background: var(--ok-bg); color: var(--ok); }
+.tag.status-failed { background: var(--crit-bg); color: var(--crit); }
+
+.tag.severity-info { background: var(--info-bg); color: var(--info); }
+.tag.severity-warning { background: var(--warn-bg); color: var(--warn); }
+.tag.severity-critical { background: var(--crit-bg); color: var(--crit); }
+
+/* ---------- Detail overlay ---------- */
+.detail-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 15, 0.72);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 20px;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.detail-overlay.hidden { display: none; }
+
+.detail-modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 680px;
+  width: 100%;
+  padding: 28px;
+  position: relative;
+}
+
+.close-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 6px;
+}
+.close-btn:hover { color: var(--text); }
+
+.detail-modal h3 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  margin: 0 0 4px;
+  padding-right: 30px;
+}
+
+.detail-modal .detail-id {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-bottom: 18px;
+}
+
+.check-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.check-block .check-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.check-block .check-name {
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.check-block .check-detail {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 560px) {
+  .app { padding: 20px 14px 48px; }
+  .image-row { grid-template-columns: auto 1fr; }
+  .image-row .issue-count, .image-row .tag { grid-column: 2; justify-self: start; }
+}
