@@ -29,6 +29,35 @@ describe("findPlateMatch (pure regex matching, no OCR engine needed)", () => {
   test("matches a shorter 1-letter-series plate variant", () => {
     expect(findPlateMatch("random text KA05M1234 random text")).toBe("KA05M1234");
   });
+
+  describe("state-code validation (regression tests from real live false positives)", () => {
+    // These exact strings were observed live: a whitelist-restricted OCR pass on
+    // real sample images produced shape-matching-but-nonsense substrings that the
+    // pre-state-code-check version of findPlateMatch incorrectly accepted as valid
+    // plates. None of TA/ET/NG are real Indian state codes.
+    test("rejects a shape-matching substring with an invalid state code (TA)", () => {
+      const noisyOcrText =
+        "2\\nA\\nCS SS SSE SK II LJ\\nS\\nSE CT NS S388 NSS S\\nUS RNS MH12\\nLAT A 1 ZN\\nH3556J\\n3\\nC\\nE AEA\\nCL TERRES\\nBERNAL N3TALCA LFA\\nMC LS 11 MH LAT\\nS0 CC AAR\\nY P\\nS P\\n4\\n5\\n2 5\\nSER\\n3 L\\nA 3 0\\nCA\\nXA\\nIE\\nGE 4 J\\nOR\\nZ4 E X A N2";
+      const result = findPlateMatch(noisyOcrText);
+      expect(result).not.toBe("TA1ZNH3556");
+    });
+
+    test("rejects a shape-matching substring with an invalid state code (ET)", () => {
+      expect(findPlateMatch("ET17F2026")).toBeNull();
+    });
+
+    test("rejects a shape-matching substring with an invalid state code (NG)", () => {
+      expect(findPlateMatch("NG1WL0737")).toBeNull();
+    });
+
+    test("still accepts a valid state code even amid noise", () => {
+      expect(findPlateMatch("XXET17F2026XX MH12NW8556 YYNG1WL0737YY")).toBe("MH12NW8556");
+    });
+
+    test("scans past an invalid-state-code match to find a later valid one in the same blob", () => {
+      expect(findPlateMatch("ET17F2026 then KA05MN1234 later")).toBe("KA05MN1234");
+    });
+  });
 });
 
 describe("cropBottomRegion dimensions (via sharp, no OCR)", () => {

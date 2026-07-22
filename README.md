@@ -358,6 +358,30 @@ from a reviewer's specific network.
 
   Both changes are still heuristic tuning, not a guarantee — but each one is a
   specific, reasoned response to an observed failure, not a shot in the dark.
+
+  **Third correction — the most important one, and a genuinely different kind of bug:**
+  deploying the character-whitelist fix and re-running all 3 real sample images
+  produced `isValidFormat: true` on every single one — but none of the three
+  "detected" plates matched the actual plates in the photos (`TA1ZNH3556` vs the real
+  `MH12N W8556`, `ET17F2026` vs the real `TN 05 BT5754`, `NG1WL0737` vs the real
+  `MH12K R1145`). This was **not** treated as a success despite the confident-looking
+  `isValidFormat: true` — the giveaway was that "TA", "ET", and "NG" aren't real
+  Indian state/UT codes, meaning the regex had found a *shape*-matching substring in
+  OCR noise, not an actual plate. Worse: this was a direct, causal regression from
+  the character-whitelist fix two corrections above — restricting OCR output to
+  letters/digits only had the side effect of removing the natural spaces and
+  punctuation that were incidentally limiting how much contiguous noise a substring
+  scan could match against, making false positives *more* likely, not less. A
+  confidently-wrong plate is a worse outcome than an honest "not detected," which is
+  exactly the failure mode the brief's "structure uncertainty, don't chase perfect
+  accuracy" framing warns against. Fixed by validating the matched candidate's
+  2-letter prefix against the real list of Indian state/UT RTO codes before accepting
+  it — cheap, and it eliminates a whole class of obviously-wrong matches (a false
+  positive could still coincidentally start with a real state code, so this is a
+  meaningful reduction, not a guarantee). Backed by 5 new regression tests built
+  directly from the exact false-positive strings observed in this live testing
+  session (see `tests/numberPlate.test.js`), not hypothetical ones.
+
 - Structured confidence calibration across checks (right now each check invents its own
   0–1 confidence scale somewhat ad hoc; a shared calibration approach would make
   aggregate "overall risk score" more meaningful).

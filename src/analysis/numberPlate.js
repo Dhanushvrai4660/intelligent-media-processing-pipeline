@@ -4,9 +4,29 @@ const { createWorker, PSM } = require("tesseract.js");
 // Indian registration plate format, e.g. "KA05MN1234" or "KA05M1234".
 // State code (2 letters) + RTO code (1-2 digits) + series (1-3 letters) + number (4 digits).
 // We validate against the *normalized* (whitespace/hyphen stripped, uppercased) OCR text.
-const PLATE_REGEX = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$/;
-const PLATE_SUBSTRING_REGEX = /[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}/;
+const PLATE_REGEX = /^([A-Z]{2})[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$/;
+const PLATE_SUBSTRING_REGEX = /([A-Z]{2})[0-9]{1,2}[A-Z]{1,3}[0-9]{4}/;
 const PLATE_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+// Real Indian state/UT RTO codes. Critical guard, not a nice-to-have: on noisy OCR
+// text, a regex matching only the plate's *shape* (2 letters + digits + letters +
+// 4 digits) finds false positives constantly -- any long enough blob of uppercase
+// letters/digits statistically contains a shape-matching substring by chance, and
+// this got measurably worse (not better) after PLATE_WHITELIST was added, because
+// stripping spaces/punctuation from OCR output removed the natural word boundaries
+// that had been incidentally limiting how much contiguous noise a substring scan
+// could match against. Found by testing against real sample images and noticing the
+// "detected" plates (e.g. "TA1ZNH3556", "ET17F2026", "NG1WL0737") didn't match the
+// actual plates in the photos -- and none of "TA"/"ET"/"NG" are real state codes,
+// which is what led to this fix rather than accepting the false positives at face
+// value. This does not guarantee every match is a real plate (a false positive could
+// still coincidentally start with a real state code), but it eliminates a whole
+// class of obviously-wrong matches cheaply.
+const VALID_STATE_CODES = new Set([
+  "AN", "AP", "AR", "AS", "BR", "CH", "CG", "DD", "DL", "DN", "GA", "GJ", "HR", "HP",
+  "JH", "JK", "KA", "KL", "LA", "LD", "MH", "ML", "MN", "MP", "MZ", "NL", "OD", "OR",
+  "PB", "PY", "RJ", "SK", "TN", "TR", "TS", "UA", "UK", "UP", "WB",
+]);
 
 const OCR_TIMEOUT_MS = 20000;
 // Fraction of image height cropped from the bottom for the second OCR pass.
@@ -32,6 +52,13 @@ function normalizeCandidate(text) {
  * Scans OCR output for a plate-shaped token: line by line (OCR naturally breaks on
  * newlines) and as one concatenated block (OCR sometimes splits a plate across
  * "words" with spurious spaces that per-line scanning alone would miss).
+ *
+ * A shape match alone (2 letters + 1-2 digits + 1-3 letters + 4 digits) is NOT
+ * sufficient to accept a candidate -- see VALID_STATE_CODES comment above for why.
+ * Every candidate is additionally checked against the real state-code list before
+ * being accepted; a shape match with an invalid state code is treated the same as
+ * no match at all.
+ *
  * Pure and dependency-free by design -- unit-tested directly with fixture strings,
  * no OCR engine needed to verify the matching logic itself (see tests/numberPlate.test.js).
  */
@@ -48,9 +75,15 @@ function findPlateMatch(rawText) {
 
   for (const candidate of candidates) {
     const exact = candidate.match(PLATE_REGEX);
-    if (exact) return exact[0];
-    const substring = candidate.match(PLATE_SUBSTRING_REGEX);
-    if (substring) return substring[0];
+    if (exact && VALID_STATE_CODES.has(exact[1])) return exact[0];
+
+    // Scan every shape-matching substring in this candidate, not just the first --
+    // a noisy blob can contain more than one, and the first one found is not
+    // necessarily the real plate.
+    const globalMatches = candidate.matchAll(new RegExp(PLATE_SUBSTRING_REGEX, "g"));
+    for (const match of globalMatches) {
+      if (VALID_STATE_CODES.has(match[1])) return match[0];
+    }
   }
   return null;
 }
