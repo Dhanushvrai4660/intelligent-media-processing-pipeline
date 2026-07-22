@@ -338,6 +338,24 @@ from a reviewer's specific network.
   switched the cropped-band pass to Tesseract's PSM 6 ("assume a single uniform block
   of text"), appropriate for a small, relatively uniform strip in a way it isn't for
   the busy full-frame layout, which keeps the default automatic segmentation mode.
+
+  **Second correction, before that fix even reached production:** the first attempt
+  at this passed `tessedit_char_whitelist`/`tessedit_pageseg_mode` directly into
+  `Tesseract.recognize()`'s convenience-wrapper options object. That object is for
+  *worker* options (logger, cache path, etc.), not Tesseract *engine* parameters —
+  passing engine parameters there compiles fine, runs without error, and silently
+  does nothing. This would have shipped a redeploy that looked like a fix and
+  measurably wasn't one. Caught by deliberately verifying the claim against the
+  installed package's own source (`grep`-ing for `setParameters` in
+  `node_modules/tesseract.js/src/createWorker.js` and its TypeScript definitions)
+  rather than trusting a first pass of documentation search results, since a search
+  result restating an API confidently is not the same as confirming it against the
+  actual dependency version installed. Fixed by switching to a manually-created
+  worker (`createWorker` + `worker.setParameters()`), which is also reused across
+  every image the process handles instead of paying full worker-init cost per call —
+  a latency improvement that fell out of fixing the correctness bug, not a separate
+  change.
+
   Both changes are still heuristic tuning, not a guarantee — but each one is a
   specific, reasoned response to an observed failure, not a shot in the dark.
 - Structured confidence calibration across checks (right now each check invents its own

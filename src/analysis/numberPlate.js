@@ -1,11 +1,12 @@
 const sharp = require("sharp");
-const Tesseract = require("tesseract.js");
+const { createWorker, PSM } = require("tesseract.js");
 
 // Indian registration plate format, e.g. "KA05MN1234" or "KA05M1234".
 // State code (2 letters) + RTO code (1-2 digits) + series (1-3 letters) + number (4 digits).
 // We validate against the *normalized* (whitespace/hyphen stripped, uppercased) OCR text.
 const PLATE_REGEX = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$/;
 const PLATE_SUBSTRING_REGEX = /[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}/;
+const PLATE_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const OCR_TIMEOUT_MS = 20000;
 // Fraction of image height cropped from the bottom for the second OCR pass.
@@ -76,20 +77,40 @@ async function cropBottomRegion(buffer) {
     .toBuffer();
 }
 
-async function runOcr(buffer, extraOptions = {}) {
+// A single, lazily-created Tesseract worker reused across every image this process
+// handles, rather than paying full worker-init + language-data-load cost (previously
+// the dominant share of this check's latency) on every call. tesseract.js queues
+// recognize() calls made on the same worker internally, so this is safe under this
+// app's QUEUE_CONCURRENCY setting -- concurrent jobs will have their OCR passes
+// serialize on the shared worker rather than error, which matches what would happen
+// anyway on the free-tier single-shared-vCPU hosting this runs on (see README).
+//
+// IMPORTANT correctness note (the reason this file looks different from an earlier
+// version): tessedit_char_whitelist and tessedit_pageseg_mode are Tesseract *engine*
+// parameters. They must be set via worker.setParameters() on a manually-created
+// worker -- passing them into the Tesseract.recognize(image, lang, options)
+// convenience wrapper's options object, as an earlier iteration of this file did,
+// silently does nothing, because that options object is for *worker* options
+// (logger, cachePath, etc.), not OCR engine parameters. This was caught and fixed
+// before it shipped a no-op change under the guise of an improvement.
+let workerPromise = null;
+function getWorker() {
+  if (!workerPromise) {
+    workerPromise = createWorker("eng").catch((err) => {
+      workerPromise = null; // allow a retry on the next call rather than caching a permanent failure
+      throw err;
+    });
+  }
+  return workerPromise;
+}
+
+async function runOcr(buffer, params) {
+  const worker = await getWorker();
   return Promise.race([
-    // Restrict recognition to characters a valid plate can actually contain.
-    // Default tesseract.js tries to recognize any script/symbol it sees, which on a
-    // cluttered rear-vehicle photo (ad banners, Hindi/regional-script text, logos)
-    // produces a flood of noise that a plate-shaped regex then has to fish a signal
-    // out of. Since this function's only output is "did we find a plate-shaped
-    // token," narrowing the character set upfront is a legitimate, low-risk way to
-    // cut that noise rather than trying to filter it after the fact.
-    Tesseract.recognize(buffer, "eng", {
-      logger: () => {}, // silence per-tile progress logs
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-      ...extraOptions,
-    }),
+    (async () => {
+      await worker.setParameters(params);
+      return worker.recognize(buffer);
+    })(),
     new Promise((_resolve, reject) =>
       setTimeout(() => reject(new Error("OCR timed out")), OCR_TIMEOUT_MS)
     ),
@@ -97,71 +118,69 @@ async function runOcr(buffer, extraOptions = {}) {
 }
 
 /**
- * Vehicle number plate check: two independent local OCR passes (tesseract.js -- runs
- * fully on-machine, no external API calls), then regex-matched against the Indian
- * plate format.
+ * Vehicle number plate check: two local OCR passes (tesseract.js -- runs fully
+ * on-machine, no external API calls) against the shared worker above, then
+ * regex-matched against the Indian plate format.
  *
- *  1. Full frame -- catches plates wherever they happen to sit in the photo.
- *  2. Cropped + upscaled bottom band -- targets the region a rear-vehicle photo
- *     (this system's stated use case) almost always has the plate in, with
- *     competing text (ad banners, signage, background clutter) cropped out and the
- *     small plate text enlarged before OCR sees it.
+ *  1. Cropped + upscaled bottom band, PSM.SINGLE_BLOCK (appropriate for a small,
+ *     relatively uniform strip) -- tried first since it's the more targeted signal
+ *     for this system's stated use case (rear-vehicle field photos).
+ *  2. Full frame, PSM.AUTO (Tesseract's default automatic layout detection, needed
+ *     for the more complex layout a whole photo can contain) -- fallback for photos
+ *     where the plate isn't in the expected region.
  *
- * The cropped pass is tried first since it's the more targeted signal for this
- * specific use case; the full-frame pass is the fallback for photos where the plate
- * isn't in the expected region. Both passes run regardless of which succeeds first
- * (not short-circuited), so a failure in one never blocks a result from the other --
- * consistent with this system's general principle that one failing signal shouldn't
- * take down a result that another signal can still provide.
+ * Both passes restrict recognition to PLATE_WHITELIST (uppercase Latin letters and
+ * digits only) via worker.setParameters(), since this function's only output is
+ * "did we find a plate-shaped token" -- narrowing the character set upfront removes
+ * an entire class of noise (Hindi/regional-script ad text, symbols, logos) before
+ * the regex-matching step ever runs, rather than trying to filter it out after.
  *
- * Trade-off: both passes are issued concurrently (not sequentially awaited), so on a
- * multi-core machine wall-clock latency approaches the slower of the two rather than
- * their sum. In practice, on the free-tier single-shared-vCPU hosting this system is
- * deployed on (see README), two concurrent CPU-bound OCR jobs mostly serialize anyway
- * -- so expect latency closer to double a single pass in this specific deployment,
- * even though the code doesn't force that serialization itself. A deliberate
- * accuracy-for-time trade given OCR was already the slowest check by a wide margin
- * either way (see README benchmark section).
+ * A failure in one pass does not block the other (each wrapped in its own try/catch)
+ * -- consistent with this system's general principle that one failing signal
+ * shouldn't take down a result another signal can still provide.
  */
 async function validateNumberPlate(buffer) {
-  const [fullResult, cropResult] = await Promise.allSettled([
-    runOcr(buffer),
-    // PSM 6 = "assume a single uniform block of text". Reasonable for the cropped
-    // bottom band (a small, relatively uniform strip) in a way it wouldn't be for the
-    // full frame, whose layout (ad banner, sky, road, multiple text blocks at
-    // different scales) is exactly the kind of complex page Tesseract's default
-    // automatic segmentation (PSM 3) is designed for instead.
-    cropBottomRegion(buffer).then((cropped) => runOcr(cropped, { tessedit_pageseg_mode: "6" })),
-  ]);
-
   const attempts = [];
-  if (cropResult.status === "fulfilled") {
+  let cropError = null;
+  let fullError = null;
+
+  try {
+    const cropped = await cropBottomRegion(buffer);
+    const result = await runOcr(cropped, {
+      tessedit_char_whitelist: PLATE_WHITELIST,
+      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+    });
     attempts.push({
       source: "cropped_bottom_region",
-      text: cropResult.value.data.text || "",
-      confidence: cropResult.value.data.confidence || 0,
+      text: result.data.text || "",
+      confidence: result.data.confidence || 0,
     });
+  } catch (err) {
+    cropError = err.message;
   }
-  if (fullResult.status === "fulfilled") {
+
+  try {
+    const result = await runOcr(buffer, {
+      tessedit_char_whitelist: PLATE_WHITELIST,
+      tessedit_pageseg_mode: PSM.AUTO,
+    });
     attempts.push({
       source: "full_frame",
-      text: fullResult.value.data.text || "",
-      confidence: fullResult.value.data.confidence || 0,
+      text: result.data.text || "",
+      confidence: result.data.confidence || 0,
     });
+  } catch (err) {
+    fullError = err.message;
   }
 
   if (attempts.length === 0) {
-    const error =
-      (fullResult.status === "rejected" && fullResult.reason.message) ||
-      (cropResult.status === "rejected" && cropResult.reason.message) ||
-      "OCR failed";
     return {
       detectedText: null,
       normalizedCandidate: null,
       isValidFormat: false,
       ocrConfidence: 0,
       matchSource: null,
-      error: `OCR failed: ${error}`,
+      error: `OCR failed: ${cropError || fullError || "unknown error"}`,
     };
   }
 
