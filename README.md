@@ -325,6 +325,21 @@ from a reviewer's specific network.
   This does NOT guarantee correct detection on every image — it's still a heuristic
   reacting to one observed failure mode, not a trained plate detector — but it's a
   concrete, evidenced improvement over the original full-frame-only approach.
+  **Follow-up, same testing session:** redeploying and re-running the exact same
+  sample image showed the crop fix alone was *not* sufficient — the cropped-region
+  pass still produced unreadable output on that image, confirmed by the new
+  `matchSource: null` field actually appearing in the live response (proof the new
+  code path was running, not just a coincidentally-similar failure). Root cause,
+  reasoned from first principles rather than guessed at randomly: Tesseract's default
+  mode tries to recognize *any* character, including the Hindi/regional-script ad
+  text elsewhere in frame — plates only ever contain uppercase Latin letters and
+  digits, so a `tessedit_char_whitelist` restricting recognition to exactly that set
+  removes an entire class of noise before the regex-matching step ever runs. Also
+  switched the cropped-band pass to Tesseract's PSM 6 ("assume a single uniform block
+  of text"), appropriate for a small, relatively uniform strip in a way it isn't for
+  the busy full-frame layout, which keeps the default automatic segmentation mode.
+  Both changes are still heuristic tuning, not a guarantee — but each one is a
+  specific, reasoned response to an observed failure, not a shot in the dark.
 - Structured confidence calibration across checks (right now each check invents its own
   0–1 confidence scale somewhat ad hoc; a shared calibration approach would make
   aggregate "overall risk score" more meaningful).

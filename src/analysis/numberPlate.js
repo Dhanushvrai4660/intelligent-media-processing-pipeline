@@ -76,9 +76,20 @@ async function cropBottomRegion(buffer) {
     .toBuffer();
 }
 
-async function runOcr(buffer) {
+async function runOcr(buffer, extraOptions = {}) {
   return Promise.race([
-    Tesseract.recognize(buffer, "eng", { logger: () => {} }), // silence per-tile progress logs
+    // Restrict recognition to characters a valid plate can actually contain.
+    // Default tesseract.js tries to recognize any script/symbol it sees, which on a
+    // cluttered rear-vehicle photo (ad banners, Hindi/regional-script text, logos)
+    // produces a flood of noise that a plate-shaped regex then has to fish a signal
+    // out of. Since this function's only output is "did we find a plate-shaped
+    // token," narrowing the character set upfront is a legitimate, low-risk way to
+    // cut that noise rather than trying to filter it after the fact.
+    Tesseract.recognize(buffer, "eng", {
+      logger: () => {}, // silence per-tile progress logs
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+      ...extraOptions,
+    }),
     new Promise((_resolve, reject) =>
       setTimeout(() => reject(new Error("OCR timed out")), OCR_TIMEOUT_MS)
     ),
@@ -115,7 +126,12 @@ async function runOcr(buffer) {
 async function validateNumberPlate(buffer) {
   const [fullResult, cropResult] = await Promise.allSettled([
     runOcr(buffer),
-    cropBottomRegion(buffer).then((cropped) => runOcr(cropped)),
+    // PSM 6 = "assume a single uniform block of text". Reasonable for the cropped
+    // bottom band (a small, relatively uniform strip) in a way it wouldn't be for the
+    // full frame, whose layout (ad banner, sky, road, multiple text blocks at
+    // different scales) is exactly the kind of complex page Tesseract's default
+    // automatic segmentation (PSM 3) is designed for instead.
+    cropBottomRegion(buffer).then((cropped) => runOcr(cropped, { tessedit_pageseg_mode: "6" })),
   ]);
 
   const attempts = [];
