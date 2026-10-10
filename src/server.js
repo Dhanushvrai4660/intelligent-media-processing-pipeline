@@ -9,10 +9,10 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   ensureUploadDir();
   await connectDB();
-
-  const server = app.listen(PORT, () => {
-    logger.info(`API server listening on port ${PORT}`);
-  });
+require("./queue/worker");
+ const server = app.listen(PORT, () => {
+  logger.info(`API server running at http://localhost:${PORT}`);
+});
 
   const shutdown = (signal) => {
     logger.info(`${signal} received, shutting down gracefully`);
